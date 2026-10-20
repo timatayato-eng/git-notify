@@ -5,6 +5,6 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ${DATA_DIR:-./data}:/app/data
+      - ./data:/app/data
     env_file:
       - .env

@@ -107,7 +107,7 @@ Discord Bot ส่ง DM หาคนนั้น
 ### 2.1 สร้างไฟล์ `.env`
 
 ```bash
-git clone <URL ของ repo นี้>
+git clone https://github.com/timatayato-eng/git-notify.git
 cd git-notify
 cp .env.default .env
 ```
@@ -287,32 +287,93 @@ GitHub ต้องส่ง request มาที่ `/webhook/github` ของ
 
 ---
 
-## Deploy อัตโนมัติด้วย GitHub Actions (ไม่บังคับ)
+## Deploy ขึ้น server
 
-`.github/workflows/deploy.yml` จะรัน test ทุกครั้งที่ push เข้า `main` หรือเปิด PR และจะ deploy เมื่อ push tag รูปแบบ `v1.2.3`
+ใช้กับ server Linux ที่มี IP สาธารณะ เช่น Ubuntu 22.04 หรือ 24.04
 
-1. **Self-hosted runner** บน server: repo → **Settings** → **Actions** → **Runners** → **New self-hosted runner** ทำตามคำสั่งที่แสดง และเพิ่ม label `prod` เครื่องต้องมี Docker และ Docker Compose และ user ที่รัน runner ต้องใช้คำสั่ง `docker` ได้
-2. **Secrets** (repo → **Settings** → **Secrets and variables** → **Actions** → แท็บ **Secrets**):
+### 1. ติดตั้ง Docker
 
-   | ชื่อ | ค่า |
-   | --- | --- |
-   | `DISCORD_TOKEN` | เหมือน `DISCORD_TOKEN` ใน `.env` |
-   | `GH_WEBHOOK_SECRET` | เหมือน `GITHUB_WEBHOOK_SECRET` (GitHub ไม่ให้ตั้งชื่อ secret ขึ้นต้นด้วย `GITHUB_`) |
+```bash
+ssh <user>@<IP ของ server>
 
-3. **Variables** (แท็บ **Variables**, ไม่บังคับ):
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+exit
+```
 
-   | ชื่อ | ค่า |
-   | --- | --- |
-   | `DISCORD_GUILD_ID` | Server ID |
-   | `GITHUB_NOTIFY_ACTIONS` | ถ้าต้องการเปลี่ยนจากค่าเริ่มต้น |
-   | `DATA_DIR` | โฟลเดอร์บน server ที่เก็บการผูกบัญชี ค่าเริ่มต้น `/var/lib/git-notify` ต้องอยู่นอกโฟลเดอร์ของ runner เพราะ runner ล้างโฟลเดอร์นั้นทุกครั้งที่ deploy |
+SSH เข้าใหม่ แล้วเช็กด้วย `docker compose version`
 
-4. deploy:
+### 2. ดึงโค้ดลง server
 
-   ```bash
-   git tag v1.0.0
-   git push origin v1.0.0
+```bash
+git clone https://github.com/timatayato-eng/git-notify.git
+cd git-notify
+```
+
+repo เป็น Private ตอน clone ให้ใส่ชื่อผู้ใช้ GitHub และใช้ [Personal Access Token](https://github.com/settings/tokens) แทนรหัสผ่าน
+
+### 3. ใส่ `.env`
+
+สร้างใหม่บน server ตามส่วนที่ 2.1 หรือ copy จากเครื่องที่ตั้งค่าไว้แล้ว โดยรันคำสั่งนี้ที่**เครื่องตัวเอง**
+
+```bash
+scp .env <user>@<IP>:~/git-notify/.env
+scp -r data <user>@<IP>:~/git-notify/
+```
+
+บรรทัด `data` ใช้เมื่อมีคนผูกบัญชีตอนทดสอบบนเครื่องไปแล้ว ข้อมูลจะได้ตามขึ้นไปด้วย
+
+### 4. รัน
+
+```bash
+cd ~/git-notify
+docker compose up -d --build
+docker compose logs -f
+```
+
+เห็น `ลงทะเบียนคำสั่ง /git-notify แล้ว` ก็กด `Ctrl+C` ออกจาก log ได้ โปรแกรมยังรันอยู่เบื้องหลัง และจะกลับมาทำงานเองเมื่อ server reboot
+
+**หยุดตัวที่รันบนเครื่องตัวเอง (`go run .` และ ngrok) ด้วย** ถ้ารันสองที่ด้วย token เดียวกัน คำสั่ง `/git-notify` จะทำงานผิดพลาด และข้อมูลการผูกบัญชีจะแยกกันอยู่สองที่
+
+### 5. เปิดให้ GitHub เข้าถึงได้
+
+**แบบ A: มีโดเมน (แนะนำ ได้ HTTPS)**
+
+1. ตั้ง DNS record ชนิด `A` เช่น `notify.example.com` ชี้ไปที่ IP ของ server
+2. ติดตั้ง [Caddy](https://caddyserver.com/docs/install#debian-ubuntu-raspbian) ตัวนี้ออกใบรับรอง HTTPS ให้อัตโนมัติ
+3. แก้ `/etc/caddy/Caddyfile` ให้เหลือแค่
+
+   ```text
+   notify.example.com {
+       reverse_proxy localhost:8080
+   }
    ```
+
+4. รัน `sudo systemctl reload caddy` และ `sudo ufw allow 80,443/tcp`
+
+Payload URL คือ `https://notify.example.com/webhook/github`
+
+**แบบ B: ใช้ IP ตรง ๆ**
+
+รัน `sudo ufw allow 8080/tcp` แล้ว Payload URL คือ `http://<IP>:8080/webhook/github` แบบนี้ข้อมูลไม่เข้ารหัสระหว่างทาง แต่ยังมี Secret ป้องกัน request ปลอม
+
+ถ้าใช้ cloud เช่น AWS, GCP หรือ DigitalOcean ต้องเปิด port ใน Security Group หรือ Firewall ของผู้ให้บริการด้วย
+
+### 6. แก้ Payload URL ใน GitHub
+
+repo → **Settings** → **Webhooks** → **Edit** เปลี่ยน **Payload URL** เป็น URL จากข้อ 5 → **Update webhook** แล้วไปแท็บ **Recent Deliveries** กด **Redeliver** ที่ `ping` ต้องได้ `200`
+
+### อัปเดตเวอร์ชัน
+
+```bash
+cd ~/git-notify
+git pull
+docker compose up -d --build
+```
+
+### สำรองข้อมูล
+
+การผูกบัญชีของทุกคนอยู่ในไฟล์ `~/git-notify/data/users.json` ไฟล์เดียว ถ้าหาย ทุกคนต้องพิมพ์ `/git-notify` ใหม่ ควร copy เก็บไว้เป็นครั้งคราว
 
 ---
 
