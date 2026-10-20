@@ -134,7 +134,7 @@ openssl rand -hex 32
 ตัวอย่าง `.env` ที่กรอกแล้ว (ไม่ต้องใส่เครื่องหมายคำพูด และไม่เว้นวรรครอบ `=`):
 
 ```env
-DISCORD_TOKEN=MTU2MTk5NTM0ODA3NDAzNzI2MA.Gxxxxx.xxxxxxxxxxxxxxxx
+DISCORD_TOKEN=<Bot Token จากข้อ 1.2>
 DISCORD_GUILD_ID=123456789012345678
 WEBHOOK_PORT=8080
 GITHUB_WEBHOOK_SECRET=3f9a1c0d...e7b2
