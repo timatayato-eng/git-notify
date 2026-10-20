@@ -4,6 +4,7 @@ logs
 
 .env
 /git-notify
+/data
 
 # Editor directories and files
 .vscode/*

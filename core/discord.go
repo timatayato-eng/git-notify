@@ -1,73 +1,45 @@
 package core
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
+	"git-notify/app"
 	"log"
-	"net/http"
 	"os"
-	"time"
+
+	"github.com/bwmarrin/discordgo"
 )
 
-const discordMaxContentLength = 2000
-
-type DiscordWebhook struct {
-	URL    string
-	Client *http.Client
+type DiscordBot struct {
+	Session *discordgo.Session
 }
 
-type allowedMentions struct {
-	Parse []string `json:"parse"`
-	Users []string `json:"users"`
-}
-
-type webhookMessage struct {
-	Content         string          `json:"content"`
-	Username        string          `json:"username,omitempty"`
-	AllowedMentions allowedMentions `json:"allowed_mentions"`
-}
-
-func InitDiscordWebhook() *DiscordWebhook {
-	url := os.Getenv("DISCORD_WEBHOOK_URL")
-	if url == "" {
-		log.Fatal("DISCORD_WEBHOOK_URL ไม่ได้ถูกตั้งค่า")
+func InitDiscord() *DiscordBot {
+	token := os.Getenv("DISCORD_TOKEN")
+	if token == "" {
+		log.Fatal("DISCORD_TOKEN ไม่ได้ถูกตั้งค่า")
 	}
-	return &DiscordWebhook{URL: url, Client: &http.Client{Timeout: 10 * time.Second}}
+	dg, err := discordgo.New("Bot " + token)
+	if err != nil {
+		log.Fatal("Error creating Discord session: ", err)
+	}
+	dg.Identify.Intents = discordgo.IntentsGuilds
+	return &DiscordBot{Session: dg}
 }
 
-// Send posts content to the channel; only users listed in mentionUserIDs are pinged.
-func (d *DiscordWebhook) Send(content string, mentionUserIDs []string) error {
-	if mentionUserIDs == nil {
-		mentionUserIDs = []string{}
+// RegisterCommands must be called after the session is open.
+// With DISCORD_GUILD_ID the command appears immediately in that server only.
+func (b *DiscordBot) RegisterCommands() {
+	guildID := os.Getenv("DISCORD_GUILD_ID")
+	if _, err := b.Session.ApplicationCommandBulkOverwrite(b.Session.State.User.ID, guildID, app.Commands); err != nil {
+		log.Fatal("ลงทะเบียนคำสั่ง /git-notify ไม่สำเร็จ: ", err)
 	}
-	body, err := json.Marshal(webhookMessage{
-		Content:         truncate(content, discordMaxContentLength),
-		Username:        os.Getenv("DISCORD_WEBHOOK_USERNAME"),
-		AllowedMentions: allowedMentions{Parse: []string{}, Users: mentionUserIDs},
-	})
+	log.Println("ลงทะเบียนคำสั่ง /git-notify แล้ว")
+}
+
+func (b *DiscordBot) DM(discordUserID, message string) error {
+	channel, err := b.Session.UserChannelCreate(discordUserID)
 	if err != nil {
 		return err
 	}
-
-	resp, err := d.Client.Post(d.URL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Discord webhook ตอบกลับ %d: %s", resp.StatusCode, respBody)
-	}
-	return nil
-}
-
-func truncate(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	return string(runes[:max-1]) + "…"
+	_, err = b.Session.ChannelMessageSend(channel.ID, message)
+	return err
 }

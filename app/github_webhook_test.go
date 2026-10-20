@@ -10,17 +10,26 @@ import (
 	"testing"
 )
 
-type fakeNotifier struct {
-	content  string
-	mentions []string
-	calls    int
+type sentDM struct{ to, message string }
+
+type fakeMessenger struct{ sent []sentDM }
+
+func (f *fakeMessenger) DM(discordUserID, message string) error {
+	f.sent = append(f.sent, sentDM{discordUserID, message})
+	return nil
 }
 
-func (f *fakeNotifier) Send(content string, mentionUserIDs []string) error {
-	f.calls++
-	f.content = content
-	f.mentions = mentionUserIDs
-	return nil
+type fakeUsers map[string]string
+
+func (f fakeUsers) DiscordID(login string) string { return f[strings.ToLower(login)] }
+
+func newHook(m *fakeMessenger, secret string) *GitHubWebhook {
+	return &GitHubWebhook{
+		Messenger: m,
+		Users:     fakeUsers{"bob": "111", "carol": "222", "alice": "333"},
+		Secret:    secret,
+		Actions:   ParseActions(""),
+	}
 }
 
 func sign(secret, body string) string {
@@ -40,81 +49,90 @@ func post(h *GitHubWebhook, event, signature, body string) *httptest.ResponseRec
 	return rec
 }
 
-func TestRejectsBadSignature(t *testing.T) {
-	n := &fakeNotifier{}
-	h := &GitHubWebhook{Notifier: n, Secret: "s3cret"}
-	body := `{"ref":"refs/heads/main"}`
+const assignBody = `{"action":"assigned","assignee":{"login":"Bob"},"sender":{"login":"alice"},
+	"issue":{"number":7,"title":"Fix login","html_url":"https://github.com/acme/demo/issues/7",
+	"assignees":[{"login":"Bob"},{"login":"carol"}]},"repository":{"full_name":"acme/demo"}}`
 
-	if rec := post(h, "push", "", body); rec.Code != http.StatusUnauthorized {
+func TestRejectsBadSignature(t *testing.T) {
+	m := &fakeMessenger{}
+	h := newHook(m, "s3cret")
+
+	if rec := post(h, "issues", "", assignBody); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing signature: status = %d, want 401", rec.Code)
 	}
-	if rec := post(h, "push", sign("wrong", body), body); rec.Code != http.StatusUnauthorized {
+	if rec := post(h, "issues", sign("wrong", assignBody), assignBody); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong signature: status = %d, want 401", rec.Code)
 	}
-	if n.calls != 0 {
-		t.Fatalf("notifier called %d times, want 0", n.calls)
+	if len(m.sent) != 0 {
+		t.Fatalf("sent %d DMs, want 0", len(m.sent))
 	}
 }
 
-func TestPingDoesNotNotify(t *testing.T) {
-	n := &fakeNotifier{}
-	h := &GitHubWebhook{Notifier: n}
-	if rec := post(h, "ping", "", `{"zen":"hi"}`); rec.Code != http.StatusOK {
+func TestAssignDMsOnlyTheNewAssignee(t *testing.T) {
+	m := &fakeMessenger{}
+	h := newHook(m, "s3cret")
+
+	if rec := post(h, "issues", sign("s3cret", assignBody), assignBody); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if n.calls != 0 {
-		t.Fatalf("notifier called %d times, want 0", n.calls)
+	if len(m.sent) != 1 || m.sent[0].to != "111" {
+		t.Fatalf("sent = %+v, want one DM to Bob (111)", m.sent)
+	}
+	want := "**[acme/demo] Issue #7** Fix login\nalice assign งานนี้ให้คุณ\nhttps://github.com/acme/demo/issues/7"
+	if m.sent[0].message != want {
+		t.Fatalf("message = %q, want %q", m.sent[0].message, want)
 	}
 }
 
-func TestPushEventNotifiesChannel(t *testing.T) {
-	n := &fakeNotifier{}
-	h := &GitHubWebhook{Notifier: n, Secret: "s3cret"}
-	body := `{"ref":"refs/heads/main","compare":"https://github.com/acme/demo/compare/a...b",
-		"commits":[{},{}],"pusher":{"name":"alice"},"repository":{"full_name":"acme/demo"}}`
-
-	if rec := post(h, "push", sign("s3cret", body), body); rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	want := "**GitHub Push** `acme/demo`\nalice push 2 commit ไปที่ `main`\nhttps://github.com/acme/demo/compare/a...b"
-	if n.content != want {
-		t.Fatalf("content = %q, want %q", n.content, want)
-	}
-}
-
-func TestAssignMentionsMappedDiscordUser(t *testing.T) {
-	n := &fakeNotifier{}
-	h := &GitHubWebhook{Notifier: n, DiscordUsers: ParseDiscordUserMap("Bob:111")}
-	body := `{"action":"assigned","assignee":{"login":"bob"},"sender":{"login":"alice"},
-		"issue":{"number":7,"title":"Fix login","html_url":"https://github.com/acme/demo/issues/7"},
-		"repository":{"full_name":"acme/demo"}}`
-
-	post(h, "issues", "", body)
-
-	if !strings.Contains(n.content, "#7 Fix login\nalice assign ให้ <@111>") {
-		t.Fatalf("content = %q, want mention of Bob", n.content)
-	}
-	if len(n.mentions) != 1 || n.mentions[0] != "111" {
-		t.Fatalf("mentions = %v, want [111]", n.mentions)
-	}
-}
-
-func TestAssignUnmappedUserUsesLogin(t *testing.T) {
-	n := &fakeNotifier{}
-	h := &GitHubWebhook{Notifier: n, DiscordUsers: map[string]string{}}
-	body := `{"action":"assigned","assignee":{"login":"carol"},"sender":{"login":"alice"},
-		"pull_request":{"number":3,"title":"Add API","html_url":"u"},"repository":{"full_name":"acme/demo"}}`
+func TestStatusChangeDMsAssigneesExceptSender(t *testing.T) {
+	m := &fakeMessenger{}
+	h := newHook(m, "")
+	body := `{"action":"closed","sender":{"login":"carol"},
+		"pull_request":{"number":3,"title":"Add API","html_url":"u","merged":true,
+		"assignees":[{"login":"bob"},{"login":"carol"},{"login":"dave"}]},"repository":{"full_name":"acme/demo"}}`
 
 	post(h, "pull_request", "", body)
 
-	if !strings.Contains(n.content, "alice assign ให้ carol") || len(n.mentions) != 0 {
-		t.Fatalf("content = %q mentions = %v, want plain login and no mentions", n.content, n.mentions)
+	if len(m.sent) != 1 || m.sent[0].to != "111" {
+		t.Fatalf("sent = %+v, want one DM to bob (carol is sender, dave not linked)", m.sent)
+	}
+	if !strings.Contains(m.sent[0].message, "carol merge แล้ว") {
+		t.Fatalf("message = %q, want merged text", m.sent[0].message)
 	}
 }
 
-func TestParseDiscordUserMap(t *testing.T) {
-	got := ParseDiscordUserMap(" Alice:1 , bob:2,broken,:3,")
-	if len(got) != 2 || got["alice"] != "1" || got["bob"] != "2" {
-		t.Fatalf("ParseDiscordUserMap = %v", got)
+func TestLabelMessageIncludesLabelName(t *testing.T) {
+	m := &fakeMessenger{}
+	h := newHook(m, "")
+	body := `{"action":"labeled","label":{"name":"in-progress"},"sender":{"login":"alice"},
+		"issue":{"number":1,"title":"T","html_url":"u","assignees":[{"login":"bob"}]},"repository":{"full_name":"acme/demo"}}`
+
+	post(h, "issues", "", body)
+
+	if len(m.sent) != 1 || !strings.Contains(m.sent[0].message, "alice เพิ่ม label `in-progress`") {
+		t.Fatalf("sent = %+v", m.sent)
+	}
+}
+
+func TestIgnoresActionsNotConfigured(t *testing.T) {
+	m := &fakeMessenger{}
+	h := newHook(m, "")
+	h.Actions = ParseActions("closed")
+
+	post(h, "issues", "", assignBody)
+	post(h, "push", "", `{"ref":"refs/heads/main"}`)
+
+	if len(m.sent) != 0 {
+		t.Fatalf("sent = %+v, want none", m.sent)
+	}
+}
+
+func TestPingDoesNotDM(t *testing.T) {
+	m := &fakeMessenger{}
+	if rec := post(newHook(m, ""), "ping", "", `{"zen":"hi"}`); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(m.sent) != 0 {
+		t.Fatalf("sent = %+v, want none", m.sent)
 	}
 }

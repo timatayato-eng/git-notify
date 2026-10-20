@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-func StartHTTPServer(notifier app.Notifier) {
+func StartHTTPServer(bot *DiscordBot, store *app.UserStore) {
 	port := os.Getenv("WEBHOOK_PORT")
 	if port == "" {
 		port = "8080"
@@ -19,9 +19,10 @@ func StartHTTPServer(notifier app.Notifier) {
 	}
 
 	http.Handle("/webhook/github", &app.GitHubWebhook{
-		Notifier:     notifier,
-		Secret:       secret,
-		DiscordUsers: app.ParseDiscordUserMap(os.Getenv("DISCORD_USER_MAP")),
+		Messenger: bot,
+		Users:     store,
+		Secret:    secret,
+		Actions:   app.ParseActions(os.Getenv("GITHUB_NOTIFY_ACTIONS")),
 	})
 
 	go func() {

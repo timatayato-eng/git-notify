@@ -4,5 +4,7 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    volumes:
+      - ${DATA_DIR:-./data}:/app/data
     env_file:
       - .env

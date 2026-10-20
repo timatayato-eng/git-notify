@@ -14,15 +14,21 @@ import (
 	"git-notify/types/github"
 )
 
-type Notifier interface {
-	Send(content string, mentionUserIDs []string) error
+const DefaultNotifyActions = "assigned,closed,reopened,labeled,unlabeled"
+
+type DirectMessenger interface {
+	DM(discordUserID, message string) error
+}
+
+type DiscordLookup interface {
+	DiscordID(githubLogin string) string
 }
 
 type GitHubWebhook struct {
-	Notifier Notifier
-	Secret   string
-	// DiscordUsers maps lowercase GitHub login to Discord user ID.
-	DiscordUsers map[string]string
+	Messenger DirectMessenger
+	Users     DiscordLookup
+	Secret    string
+	Actions   map[string]bool
 }
 
 func (h *GitHubWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -44,9 +50,8 @@ func (h *GitHubWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	event := r.Header.Get("X-GitHub-Event")
-	log.Printf("[GitHub] event=%s body=%s", event, string(body))
-
 	if event == "ping" {
+		log.Println("[GitHub] ping สำเร็จ")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -57,67 +62,112 @@ func (h *GitHubWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if payload.Action == "assigned" && payload.Assignee != nil {
-		h.notifyAssign(payload)
-	} else {
-		h.notify(formatGitHubMessage(event, payload), nil)
+	item, kind := payloadItem(event, payload)
+	if item == nil || !h.Actions[payload.Action] {
+		log.Printf("[GitHub] ข้าม event=%s action=%s", event, payload.Action)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	message := formatMessage(kind, *item, payload)
+	for _, login := range recipients(*item, payload) {
+		h.sendDM(login, message)
 	}
 
 	w.WriteHeader(http.StatusOK)
 }
 
-func (h *GitHubWebhook) notifyAssign(payload github.Payload) {
-	login := payload.Assignee.Login
-	assignee := login
-	var mentionIDs []string
-	if discordID := h.DiscordUsers[strings.ToLower(login)]; discordID != "" {
-		assignee = fmt.Sprintf("<@%s>", discordID)
-		mentionIDs = []string{discordID}
-	} else {
-		log.Printf("ไม่พบ Discord ID ใน DISCORD_USER_MAP สำหรับ: %s", login)
+func (h *GitHubWebhook) sendDM(login, message string) {
+	discordID := h.Users.DiscordID(login)
+	if discordID == "" {
+		log.Printf("[GitHub] %s ยังไม่ได้ผูกบัญชีด้วย /git-notify ข้ามการส่ง DM", login)
+		return
 	}
-
-	item := payloadItem(payload)
-	h.notify(fmt.Sprintf("**GitHub Assign** — #%d %s\n%s assign ให้ %s\nRepo: %s\n%s",
-		item.Number, item.Title, payload.Sender.Login, assignee,
-		payload.Repository.FullName, item.HTMLURL), mentionIDs)
+	if err := h.Messenger.DM(discordID, message); err != nil {
+		log.Printf("ส่ง DM ไปยัง %s (%s) ไม่สำเร็จ: %v", login, discordID, err)
+		return
+	}
+	log.Printf("ส่ง DM ไปยัง %s (%s) สำเร็จ", login, discordID)
 }
 
-func (h *GitHubWebhook) notify(message string, mentionIDs []string) {
-	if err := h.Notifier.Send(message, mentionIDs); err != nil {
-		log.Printf("ไม่สามารถส่ง Discord notify: %v", err)
-	}
-}
-
-func formatGitHubMessage(event string, payload github.Payload) string {
+func payloadItem(event string, payload github.Payload) (*github.Item, string) {
 	switch event {
-	case "push":
-		branch := strings.TrimPrefix(strings.TrimPrefix(payload.Ref, "refs/heads/"), "refs/tags/")
-		return fmt.Sprintf("**GitHub Push** `%s`\n%s push %d commit ไปที่ `%s`\n%s",
-			payload.Repository.FullName, payload.Pusher.Name, len(payload.Commits), branch, payload.Compare)
-	case "pull_request", "issues":
-		kind := "PR"
-		if event == "issues" {
-			kind = "Issue"
+	case "issues":
+		return payload.Issue, "Issue"
+	case "pull_request":
+		return payload.PullRequest, "PR"
+	}
+	return nil, ""
+}
+
+// recipients returns who should get a DM, never including the person who made the change.
+func recipients(item github.Item, payload github.Payload) []string {
+	candidates := item.Assignees
+	if payload.Action == "assigned" || payload.Action == "unassigned" {
+		candidates = nil
+		if payload.Assignee != nil {
+			candidates = []github.User{*payload.Assignee}
 		}
-		item := payloadItem(payload)
-		return fmt.Sprintf("**GitHub %s** `%s` — #%d %s\nโดย %s\nRepo: %s\n%s",
-			kind, payload.Action, item.Number, item.Title, payload.Sender.Login,
-			payload.Repository.FullName, item.HTMLURL)
+	}
+
+	seen := map[string]bool{strings.ToLower(payload.Sender.Login): true}
+	var logins []string
+	for _, u := range candidates {
+		key := strings.ToLower(u.Login)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		logins = append(logins, u.Login)
+	}
+	return logins
+}
+
+func formatMessage(kind string, item github.Item, payload github.Payload) string {
+	return fmt.Sprintf("**[%s] %s #%d** %s\n%s\n%s",
+		payload.Repository.FullName, kind, item.Number, item.Title,
+		describeAction(payload, item), item.HTMLURL)
+}
+
+func describeAction(payload github.Payload, item github.Item) string {
+	sender := payload.Sender.Login
+	label := ""
+	if payload.Label != nil {
+		label = payload.Label.Name
+	}
+	switch payload.Action {
+	case "assigned":
+		return sender + " assign งานนี้ให้คุณ"
+	case "unassigned":
+		return sender + " เอาคุณออกจากงานนี้"
+	case "closed":
+		if item.Merged {
+			return sender + " merge แล้ว"
+		}
+		return sender + " ปิดแล้ว"
+	case "reopened":
+		return sender + " เปิดใหม่อีกครั้ง"
+	case "labeled":
+		return fmt.Sprintf("%s เพิ่ม label `%s`", sender, label)
+	case "unlabeled":
+		return fmt.Sprintf("%s ลบ label `%s`", sender, label)
 	default:
-		return fmt.Sprintf("**GitHub: %s** `%s`\nRepo: %s\n%s",
-			event, payload.Action, payload.Repository.FullName, payload.Repository.HTMLURL)
+		return fmt.Sprintf("%s อัปเดต: `%s`", sender, payload.Action)
 	}
 }
 
-func payloadItem(payload github.Payload) github.Item {
-	if payload.PullRequest != nil {
-		return *payload.PullRequest
+// ParseActions parses a comma-separated list such as "assigned,closed".
+func ParseActions(raw string) map[string]bool {
+	if strings.TrimSpace(raw) == "" {
+		raw = DefaultNotifyActions
 	}
-	if payload.Issue != nil {
-		return *payload.Issue
+	actions := make(map[string]bool)
+	for _, a := range strings.Split(raw, ",") {
+		if a = strings.ToLower(strings.TrimSpace(a)); a != "" {
+			actions[a] = true
+		}
 	}
-	return github.Item{}
+	return actions
 }
 
 func validSignature(secret string, body []byte, header string) bool {
@@ -132,21 +182,4 @@ func validSignature(secret string, body []byte, header string) bool {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
 	return hmac.Equal(gotBytes, mac.Sum(nil))
-}
-
-// ParseDiscordUserMap parses "githubLogin:discordID,otherLogin:otherID".
-func ParseDiscordUserMap(raw string) map[string]string {
-	users := make(map[string]string)
-	for _, pair := range strings.Split(raw, ",") {
-		login, id, ok := strings.Cut(strings.TrimSpace(pair), ":")
-		login, id = strings.TrimSpace(login), strings.TrimSpace(id)
-		if !ok || login == "" || id == "" {
-			if pair = strings.TrimSpace(pair); pair != "" {
-				log.Printf("DISCORD_USER_MAP รูปแบบไม่ถูกต้อง ข้าม: %q", pair)
-			}
-			continue
-		}
-		users[strings.ToLower(login)] = id
-	}
-	return users
 }

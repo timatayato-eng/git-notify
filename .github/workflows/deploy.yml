@@ -25,16 +25,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Write .env
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           GITHUB_WEBHOOK_SECRET: ${{ secrets.GH_WEBHOOK_SECRET }}
-          DISCORD_USER_MAP: ${{ vars.DISCORD_USER_MAP }}
-          DISCORD_WEBHOOK_USERNAME: ${{ vars.DISCORD_WEBHOOK_USERNAME || 'GitHub' }}
+          DISCORD_GUILD_ID: ${{ vars.DISCORD_GUILD_ID }}
+          GITHUB_NOTIFY_ACTIONS: ${{ vars.GITHUB_NOTIFY_ACTIONS }}
+          DATA_DIR: ${{ vars.DATA_DIR || '/var/lib/git-notify' }}
         run: |
           {
-            echo "DISCORD_WEBHOOK_URL=$DISCORD_WEBHOOK_URL"
-            echo "DISCORD_WEBHOOK_USERNAME=$DISCORD_WEBHOOK_USERNAME"
+            echo "DISCORD_TOKEN=$DISCORD_TOKEN"
+            echo "DISCORD_GUILD_ID=$DISCORD_GUILD_ID"
             echo "WEBHOOK_PORT=8080"
             echo "GITHUB_WEBHOOK_SECRET=$GITHUB_WEBHOOK_SECRET"
-            echo "DISCORD_USER_MAP=$DISCORD_USER_MAP"
+            echo "GITHUB_NOTIFY_ACTIONS=$GITHUB_NOTIFY_ACTIONS"
+            echo "USER_STORE_PATH=data/users.json"
+            echo "DATA_DIR=$DATA_DIR"
           } > .env
       - run: docker compose up -d --build
