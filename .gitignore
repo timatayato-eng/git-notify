@@ -1,0 +1,14 @@
+# Logs
+logs
+*.log
+
+.env
+/git-notify
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.sw?
