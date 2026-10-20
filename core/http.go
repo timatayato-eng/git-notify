@@ -13,17 +13,19 @@ func StartHTTPServer(notifier app.Notifier) {
 		port = "8080"
 	}
 
-	secret := os.Getenv("GITLAB_WEBHOOK_SECRET")
+	secret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	if secret == "" {
-		log.Println("GITLAB_WEBHOOK_SECRET ไม่ได้ถูกตั้งค่า webhook จะรับ request จากทุกที่")
+		log.Println("GITHUB_WEBHOOK_SECRET ไม่ได้ถูกตั้งค่า webhook จะรับ request จากทุกที่")
 	}
 
-	http.HandleFunc("/webhook/gitlab", func(w http.ResponseWriter, r *http.Request) {
-		app.GitLabWebhookHandler(notifier, secret, w, r)
+	http.Handle("/webhook/github", &app.GitHubWebhook{
+		Notifier:     notifier,
+		Secret:       secret,
+		DiscordUsers: app.ParseDiscordUserMap(os.Getenv("DISCORD_USER_MAP")),
 	})
 
 	go func() {
-		log.Printf("GitLab webhook server กำลังทำงานที่ port %s", port)
+		log.Printf("GitHub webhook server กำลังทำงานที่ port %s", port)
 		if err := http.ListenAndServe(":"+port, nil); err != nil {
 			log.Fatal("HTTP server error:", err)
 		}
